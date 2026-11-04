@@ -696,12 +696,79 @@ unsigned int FindFreeVirtualSlice()
 }
 
 
-unsigned int FindFreeVirtualSliceForGc(unsigned int copyTargetDieNo, const unsigned int* victimBlockNo, unsigned short victimCount, unsigned int age)
+static int IsGcVictim(const unsigned int *victimBlockNos,
+	unsigned short victimCount, unsigned int blockNo)
+{
+	unsigned short i;
+
+	for(i = 0; i < victimCount; i++)
+		if(victimBlockNos[i] == blockNo)
+			return 1;
+
+	return 0;
+}
+
+/* Remove either the least-worn or most-worn block from one die's free list. */
+static unsigned int GetFromFbListByWear(unsigned int dieNo, int mostWorn)
+{
+	unsigned int blockNo, selectedBlockNo, nextBlockNo;
+
+	if(virtualDieMapPtr->die[dieNo].headFreeBlock == BLOCK_NONE)
+		return BLOCK_FAIL;
+
+	selectedBlockNo = virtualDieMapPtr->die[dieNo].headFreeBlock;
+	for(blockNo = selectedBlockNo; blockNo != BLOCK_NONE;
+		blockNo = virtualBlockMapPtr->block[dieNo][blockNo].nextBlock)
+	{
+		if((mostWorn &&
+			virtualBlockMapPtr->block[dieNo][blockNo].eraseCnt >
+			virtualBlockMapPtr->block[dieNo][selectedBlockNo].eraseCnt) ||
+			(!mostWorn &&
+			virtualBlockMapPtr->block[dieNo][blockNo].eraseCnt <
+			virtualBlockMapPtr->block[dieNo][selectedBlockNo].eraseCnt))
+			selectedBlockNo = blockNo;
+	}
+
+	blockNo = virtualBlockMapPtr->block[dieNo][selectedBlockNo].prevBlock;
+	nextBlockNo = virtualBlockMapPtr->block[dieNo][selectedBlockNo].nextBlock;
+	if(blockNo != BLOCK_NONE)
+		virtualBlockMapPtr->block[dieNo][blockNo].nextBlock = nextBlockNo;
+	else
+		virtualDieMapPtr->die[dieNo].headFreeBlock = nextBlockNo;
+	if(nextBlockNo != BLOCK_NONE)
+		virtualBlockMapPtr->block[dieNo][nextBlockNo].prevBlock = blockNo;
+	else
+		virtualDieMapPtr->die[dieNo].tailFreeBlock = blockNo;
+
+	virtualBlockMapPtr->block[dieNo][selectedBlockNo].free = 0;
+	virtualBlockMapPtr->block[dieNo][selectedBlockNo].prevBlock = BLOCK_NONE;
+	virtualBlockMapPtr->block[dieNo][selectedBlockNo].nextBlock = BLOCK_NONE;
+	virtualDieMapPtr->die[dieNo].freeBlockCnt--;
+	return selectedBlockNo;
+}
+
+unsigned int FindFreeVirtualSliceForGc(unsigned int copyTargetDieNo,
+	const unsigned int* victimBlockNos, unsigned short victimCount, unsigned int age)
 {
 	unsigned int currentBlock, virtualSliceAddr, dieNo;
 
 	dieNo = copyTargetDieNo;
-	if(victimBlockNo == virtualDieMapPtr->die[dieNo].currentBlock)
+
+	/* A non-zero age starts a dedicated destination block for this GC group. */
+	if(age != 0)
+	{
+		currentBlock = GetFromFbListByWear(dieNo, age > GC_AGE_THRESHOLD);
+		if(currentBlock == BLOCK_FAIL)
+			assert(!"[WARNING] There is no available block [WARNING]");
+
+		virtualSliceAddr = Vorg2VsaTranslation(dieNo, currentBlock, 0);
+		virtualBlockMapPtr->block[dieNo][currentBlock].currentPage = 1;
+		return virtualSliceAddr;
+	}
+
+	/* age == 0 keeps using the pre-existing GC log. */
+	if(IsGcVictim(victimBlockNos, victimCount,
+		virtualDieMapPtr->die[dieNo].currentBlock))
 	{
 		virtualDieMapPtr->die[dieNo].currentBlock = GetFromFbList(dieNo, GET_FREE_BLOCK_GC);
 		if(virtualDieMapPtr->die[dieNo].currentBlock == BLOCK_FAIL)
@@ -711,9 +778,7 @@ unsigned int FindFreeVirtualSliceForGc(unsigned int copyTargetDieNo, const unsig
 
 	if(virtualBlockMapPtr->block[dieNo][currentBlock].currentPage == USER_PAGES_PER_BLOCK)
 	{
-
 		currentBlock = GetFromFbList(dieNo, GET_FREE_BLOCK_GC);
-
 		if(currentBlock != BLOCK_FAIL)
 			virtualDieMapPtr->die[dieNo].currentBlock = currentBlock;
 		else
@@ -722,8 +787,8 @@ unsigned int FindFreeVirtualSliceForGc(unsigned int copyTargetDieNo, const unsig
 	else if(virtualBlockMapPtr->block[dieNo][currentBlock].currentPage > USER_PAGES_PER_BLOCK)
 		assert(!"[WARNING] Current page management fail [WARNING]");
 
-
-	virtualSliceAddr = Vorg2VsaTranslation(dieNo, currentBlock, virtualBlockMapPtr->block[dieNo][currentBlock].currentPage);
+	virtualSliceAddr = Vorg2VsaTranslation(dieNo, currentBlock,
+		virtualBlockMapPtr->block[dieNo][currentBlock].currentPage);
 	virtualBlockMapPtr->block[dieNo][currentBlock].currentPage++;
 	return virtualSliceAddr;
 }
